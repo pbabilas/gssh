@@ -1,0 +1,36 @@
+- host:
+    address: 192.0.2.10
+    description: Serwer NAS
+    username: admin
+    title: NAS
+    group: homelab
+- host:
+    address: 192.0.2.1
+    description: Router
+    username: admin
+    title: Router
+    group: homelab
+- host:
+    address: 198.51.100.11
+    description: Worker k8s prod
+    username: root
+    network_port: '2222'
+    title: node-01
+    group: work/k8s-prod
+- host:
+    address: 198.51.100.12
+    description: Worker k8s prod
+    username: root
+    network_port: '2222'
+    title: node-02
+    group: work/k8s-prod
+- host:
+    address: 198.51.100.21
+    description: Vault, node 0
+    title: vault-0
+    group: work/vault
+- host:
+    address: 203.0.113.5
+    description: VPS
+    username: ubuntu
+    title: VPS

@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# Hosty z goto (hosts.yaml) w widoku katalogowym: grupy jako foldery obok hostów bez grupy.
+set -euo pipefail
+
+HOSTS_FILE="${GSSH_HOSTS:-$HOME/.config/goto/hosts.yaml}"
+GROUPS_FILE="${GSSH_GROUPS:-$HOME/.config/gssh/groups.yaml}"
+
+command -v fzf >/dev/null || { echo "gssh: brak fzf (sudo apt install fzf)" >&2; exit 1; }
+[[ -r "$HOSTS_FILE" ]] || { echo "gssh: nie można czytać $HOSTS_FILE" >&2; exit 1; }
+
+# Wpis (zakończony NUL): typ <TAB> grupa <TAB> adres <TAB> user <TAB> port <TAB> podgląd <TAB> widok (może mieć 2 linie)
+list_entries() {
+    python3 - "$HOSTS_FILE" "$GROUPS_FILE" "$1" <<'PY'
+import sys, yaml
+
+import os
+path, groups_path, level = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path) as f:
+    hosts = [e["host"] for e in (yaml.safe_load(f) or []) if "host" in e]
+captions = {}
+if os.path.exists(groups_path):
+    with open(groups_path) as f:
+        captions = {str(k).strip("/"): str(v) for k, v in (yaml.safe_load(f) or {}).items()}
+
+BOLD, DIM, BLUE, CYAN, RESET = "\033[1m", "\033[2m", "\033[1;34m", "\033[36m", "\033[0m"
+
+def clean(v):
+    return str(v or "").replace("\t", " ").replace("\n", " ").strip()
+
+def target(h):
+    user, addr, port = clean(h.get("username")), clean(h.get("address")), clean(h.get("network_port"))
+    return (f"{user}@" if user else "") + addr + (f":{port}" if port else "")
+
+def preview_host(h):
+    lines = [f"{BOLD}{clean(h.get('title'))}{RESET}", ""]
+    if clean(h.get("description")):
+        lines += [clean(h.get("description")), ""]
+    lines.append(f"{CYAN}{target(h)}{RESET}")
+    return "\\n".join(lines)
+
+def preview_group(g, members):
+    lines = [f"{BOLD}{g}{RESET}  {DIM}{len(members)} hostów{RESET}"]
+    if g in captions:
+        lines.append(captions[g])
+    lines.append("")
+    lines += [f"{clean(h.get('title')):<{width}}  {DIM}{target(h)}{RESET}" for h in members]
+    return "\\n".join(lines)
+
+def row(kind, view, group, h, preview):
+    sys.stdout.write("\t".join([kind, group, clean(h.get("address")), clean(h.get("username")),
+                                clean(h.get("network_port")), preview, view]) + "\0")
+
+def grp(h):
+    return clean(h.get("group")).strip("/")
+
+prefix = level + "/" if level else ""
+groups = sorted({prefix + grp(h)[len(prefix):].split("/")[0]
+                 for h in hosts if grp(h).startswith(prefix) and grp(h) != level})
+shown = [h for h in hosts if grp(h) == level]
+
+width = max([len(clean(h.get("title"))) for h in hosts] + [len(g) + 2 for g in groups] + [10])
+
+def under(g):
+    return [h for h in hosts if grp(h) == g or grp(h).startswith(g + "/")]
+
+for g in groups:
+    members = under(g)
+    name = g[len(prefix):]
+    view = f"{BLUE}▸ {name:<{width - 2}}{RESET}  {DIM}{len(members)} hostów{RESET}"
+    if g in captions:
+        view += f"\n  {DIM}{captions[g]}{RESET}"
+    row("group", view, g, {}, preview_group(g, members))
+for h in shown:
+    view = f"{clean(h.get('title')):<{width}}  {DIM}{target(h)}{RESET}"
+    row("host", view, level, h, preview_host(h))
+PY
+}
+
+# Formularz nowego hosta w oknie fzf; grupa domyślnie = bieżący katalog.
+FZF_STYLE=(--layout=reverse --height=100% --border=rounded --info=hidden --no-scrollbar --header-first
+    --color="border:8,label:4:bold,header:8,prompt:4:bold,pointer:5,hl:3,hl+:3:bold,bg+:236,info:8,separator:8")
+
+form_summary() {
+    local i out=""
+    for i in "${!FORM_LABELS[@]}"; do
+        [[ $i -ge $1 ]] && break
+        out+=$(printf '  %-11s %s' "${FORM_LABELS[$i]}:" "${FORM_VALUES[$i]}")$'\n'
+    done
+    printf '%s' "$out"
+}
+
+ask_field() {   # $1 indeks pola, $2 komunikat błędu
+    local idx=$1 header
+    header="$(form_summary "$idx")"$'\n'"${2:+  ! $2}"$'\n'"  Enter: dalej   Esc: anuluj"
+    fzf "${FZF_STYLE[@]}" --disabled --border-label=" gssh: nowy host w ${FORM_LEVEL:-~}/ " \
+        --prompt="  ${FORM_LABELS[$idx]}: " --query="${FORM_VALUES[$idx]}" \
+        --header="$header" --bind='enter:print-query' </dev/null
+}
+
+add_host() {
+    FORM_LEVEL=$1
+    FORM_LABELS=(Nazwa Adres Użytkownik Port Opis Grupa)
+    FORM_VALUES=("" "" "" "" "" "$1")
+    local i=0 err="" val
+    while (( i < ${#FORM_LABELS[@]} )); do
+        val=$(ask_field "$i" "$err") || return 0
+        err=""
+        case $i in
+            0|1) [[ -z "$val" ]] && { err="${FORM_LABELS[$i]} jest wymagana"; [[ $i -eq 1 ]] && err="Adres jest wymagany"; continue; } ;;
+            3) [[ -n "$val" && ! "$val" =~ ^[0-9]+$ ]] && { err="Port musi być liczbą"; continue; } ;;
+        esac
+        FORM_VALUES[$i]=$val
+        i=$((i + 1))
+    done
+
+    local choice
+    choice=$(printf 'Zapisz\nAnuluj\n' | fzf "${FZF_STYLE[@]}" --border-label=" gssh: nowy host w ${FORM_LEVEL:-~}/ " \
+        --prompt="  " --header="$(form_summary 99)"$'\n'"  Enter: wybierz   Esc: anuluj") || return 0
+    [[ "$choice" == "Zapisz" ]] || return 0
+
+    python3 - "$HOSTS_FILE" "${FORM_VALUES[@]}" <<'PY'
+import sys, yaml
+path, title, address, user, port, desc, group = sys.argv[1:]
+host = {"address": address}
+if desc: host["description"] = desc
+if user: host["username"] = user
+if port: host["network_port"] = port
+host["title"] = title
+group = group.strip("/")
+if group: host["group"] = group
+with open(path) as f:
+    text = f.read()
+block = yaml.safe_dump([{"host": host}], allow_unicode=True, sort_keys=False)
+with open(path, "a") as f:
+    f.write(("" if text.endswith("\n") or not text else "\n") + block)
+PY
+}
+
+level=""
+while true; do
+    if [[ -z "$level" ]]; then
+        header="Enter/→: wejdź   Enter: połącz   Ctrl-N: nowy host   Esc: wyjście"
+        back_bind="left:backward-char"
+    else
+        header="Enter/→: wejdź   Enter: połącz   Ctrl-N: nowy host   ←/Esc: wstecz"
+        back_bind='left:transform:[[ -z {q} ]] && echo abort || echo backward-char'
+    fi
+    if ! choice=$(list_entries "$level" | fzf --read0 --ansi --delimiter=$'\t' --with-nth=7 --gap --bind="$back_bind" \
+            --bind='ctrl-n:become(echo __add__)' \
+            --bind='right:transform:[[ {1} == group ]] && echo accept || echo forward-char' \
+            --prompt="  ${level:-~}/ " --header="$header" --header-first \
+            --layout=reverse --height=100% --border=rounded --border-label=" gssh " \
+            --info=inline-right --pointer="▌" --no-sort --tiebreak=begin --no-scrollbar \
+            --preview="printf '%b' {6}" --preview-window="right,45%,border-left,wrap" \
+            --color="border:8,label:4:bold,header:8,prompt:4:bold,pointer:5,hl:3,hl+:3:bold,bg+:236,info:8,separator:8"); then
+        if [[ -n "$level" ]]; then
+            [[ "$level" == */* ]] && level="${level%/*}" || level=""
+            continue
+        fi
+        exit 0
+    fi
+
+    if [[ "$choice" == "__add__" ]]; then
+        add_host "$level"
+        continue
+    fi
+
+    field() { head -n1 <<<"$choice" | cut -d$'\t' -f"$1"; }
+    kind=$(field 1) group=$(field 2) address=$(field 3) user=$(field 4) port=$(field 5)
+    if [[ "$kind" == "group" ]]; then
+        level="$group"
+        continue
+    fi
+
+    args=()
+    [[ -n "$port" ]] && args+=(-p "$port")
+    [[ -n "$user" ]] && args+=(-l "$user")
+    exec ssh "${args[@]}" "$address"
+done

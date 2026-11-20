@@ -1,0 +1,5 @@
+# Podpisy grup w gssh; klucz = ścieżka z pola group w hosts.yaml
+homelab: Sprzęt domowy
+work: Infrastruktura w pracy
+work/k8s-prod: Klaster Kubernetes prod, workery
+work/vault: HashiCorp Vault, 3 nody
